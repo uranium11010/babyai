@@ -4,7 +4,7 @@ import numpy
 import torch
 from babyai.utils.agent import load_agent, ModelAgent, DemoAgent, BotAgent
 from babyai.utils.demos import (
-    load_demos, save_demos, synthesize_demos, get_demos_path)
+    load_demos, save_demos, synthesize_demos, get_demos_path, abstract_demos)
 from babyai.utils.format import ObssPreprocessor, IntObssPreprocessor, get_vocab_path
 from babyai.utils.log import (
     get_log_path, get_log_dir, synthesize, configure_logging)
@@ -22,9 +22,9 @@ def create_folders_if_necessary(path):
         os.makedirs(dirname)
 
 
-def seed(seed):
+def seed(seed, use_gpu=True):
     random.seed(seed)
     numpy.random.seed(seed)
     torch.manual_seed(seed)
-    if torch.cuda.is_available():
+    if use_gpu and torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)

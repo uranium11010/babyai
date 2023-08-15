@@ -3,7 +3,7 @@ channels:
     - pytorch
     - defaults
 dependencies:
-    - python=3.6
+    - python=3.8
     - pytorch=1.4
     - numpy
     - blosc

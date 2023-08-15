@@ -11,7 +11,7 @@ class BaseAlgo(ABC):
     """The base class for RL algorithms."""
 
     def __init__(self, envs, acmodel, num_frames_per_proc, discount, lr, gae_lambda, entropy_coef,
-                 value_loss_coef, max_grad_norm, recurrence, preprocess_obss, reshape_reward, aux_info):
+                 value_loss_coef, max_grad_norm, recurrence, preprocess_obss, reshape_reward, aux_info, device=0):
         """
         Initializes a `BaseAlgo` instance.
 
@@ -68,7 +68,7 @@ class BaseAlgo(ABC):
 
         # Store helpers values
 
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = torch.device(device if torch.cuda.is_available() else "cpu")
         self.num_procs = len(envs)
         self.num_frames = self.num_frames_per_proc * self.num_procs
 
@@ -141,7 +141,9 @@ class BaseAlgo(ABC):
 
             action = dist.sample()
 
-            obs, reward, done, env_info = self.env.step(action.cpu().numpy())
+            new_obs, reward, done, env_info = self.env.step(action.cpu().numpy())
+            if new_obs is not None:
+                obs = new_obs
             if self.aux_info:
                 env_info = self.aux_info_collector.process(env_info)
                 # env_info = self.process_aux_info(env_info)

@@ -285,7 +285,7 @@ class ACModel(nn.Module, babyai.rl.RecurrentACModel):
             if lengths.shape[0] > 1:
                 seq_lengths, perm_idx = lengths.sort(0, descending=True)
                 iperm_idx = torch.LongTensor(perm_idx.shape).fill_(0)
-                if instr.is_cuda: iperm_idx = iperm_idx.cuda()
+                if instr.is_cuda: iperm_idx = iperm_idx.cuda(instr.device)
                 for i, v in enumerate(perm_idx):
                     iperm_idx[v.data] = i
 

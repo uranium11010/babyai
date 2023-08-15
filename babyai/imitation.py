@@ -10,6 +10,9 @@ from babyai.evaluate import batch_evaluate
 import babyai.utils as utils
 from babyai.rl import DictList
 from babyai.model import ACModel
+from babyai.levels import create_abs_env
+from abstractions.compress import IAPLogN
+from abstractions.steps import Solution
 import multiprocessing
 import os
 import json
@@ -76,8 +79,10 @@ class ImitationLearning(object):
     def __init__(self, args, ):
         self.args = args
 
-        utils.seed(self.args.seed)
+        utils.seed(self.args.seed, args.device >= 0)
         self.val_seed = self.args.val_seed
+
+        self.rules = None
 
         # args.env is a list when training on multiple environments
         if getattr(args, 'multi_env', None):
@@ -129,6 +134,24 @@ class ImitationLearning(object):
                 logger.info('Using all the available {} demos to evaluate valid. accuracy'.format(len(self.val_demos)))
             self.val_demos = self.val_demos[:self.args.val_episodes]
 
+            if args.abs_type is not None:
+                if os.path.isfile(os.path.join(utils.get_model_dir(args.model), "train_demos.pkl")):
+                    logger.info('pre-abstracted demos and env found. loading...')
+                    utils.load_demos(os.path.join(utils.get_model_dir(args.model), "train_demos.pkl"))
+                    utils.load_demos(os.path.join(utils.get_model_dir(args.model), "val_demos.pkl"))
+                    utils.load_demos(os.path.join(utils.get_model_dir(args.model), "rules.pkl"))
+                    logger.info('pre-abstracted demos and env loaded')
+                else:
+                    logger.info('abstracting demos and env')
+                    self.abs_demos = self.train_demos
+                    self.train_demos, self.rules = utils.abstract_demos(self.abs_demos, args)
+                    self.val_demos, _ = utils.abstract_demos(self.val_demos, args, self.rules)
+                    utils.save_demos(self.train_demos, os.path.join(utils.get_model_dir(args.model), "train_demos.pkl"))
+                    utils.save_demos(self.val_demos, os.path.join(utils.get_model_dir(args.model), "val_demos.pkl"))
+                    utils.save_demos(self.rules, os.path.join(utils.get_model_dir(args.model), "rules.pkl"))
+                    self.env = create_abs_env(self.env, self.rules)
+                    logger.info('abstracted demos and env')
+
             observation_space = self.env.observation_space
             action_space = self.env.action_space
 
@@ -150,13 +173,13 @@ class ImitationLearning(object):
         utils.save_model(self.acmodel, args.model)
 
         self.acmodel.train()
-        if torch.cuda.is_available():
-            self.acmodel.cuda()
+        if args.device >= 0 and torch.cuda.is_available():
+            self.acmodel.cuda(args.device)
 
         self.optimizer = torch.optim.Adam(self.acmodel.parameters(), self.args.lr, eps=self.args.optim_eps)
         self.scheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, step_size=100, gamma=0.9)
 
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = torch.device(args.device if args.device >= 0 and torch.cuda.is_available() else "cpu")
 
     @staticmethod
     def default_model_name(args):
@@ -174,8 +197,9 @@ class ImitationLearning(object):
             'arch': args.arch,
             'instr': instr,
             'seed': args.seed,
+            'abs_type': '' if args.abs_type is None else f'_{args.abs_type}',
             'suffix': suffix}
-        default_model_name = "{envs}_IL_{arch}_{instr}_seed{seed}_{suffix}".format(**model_name_parts)
+        default_model_name = "{envs}_IL_{arch}_{instr}{abs_type}_seed{seed}_{suffix}".format(**model_name_parts)
         if getattr(args, 'pretrained_model', None):
             default_model_name = args.pretrained_model + '_pretrained_' + default_model_name
         return default_model_name
@@ -305,6 +329,7 @@ class ImitationLearning(object):
             final_entropy += entropy
             final_policy_loss += policy_loss
             indexes += 1
+            # breakpoint()
 
         final_loss /= self.args.recurrence
 
@@ -324,9 +349,9 @@ class ImitationLearning(object):
         if verbose:
             logger.info("Validating the model")
         if getattr(self.args, 'multi_env', None):
-            agent = utils.load_agent(self.env[0], model_name=self.args.model, argmax=True)
+            agent = utils.load_agent(self.env[0], model_name=self.args.model, argmax=True, device=self.args.device)
         else:
-            agent = utils.load_agent(self.env, model_name=self.args.model, argmax=True)
+            agent = utils.load_agent(self.env, model_name=self.args.model, argmax=True, device=self.args.device)
 
         # Setting the agent model to the current model
         agent.model = self.acmodel
@@ -336,7 +361,7 @@ class ImitationLearning(object):
 
         for env_name in ([self.args.env] if not getattr(self.args, 'multi_env', None)
                          else self.args.multi_env):
-            logs += [batch_evaluate(agent, env_name, self.val_seed, episodes)]
+            logs += [batch_evaluate(agent, env_name, self.val_seed, episodes, rules=self.rules)]
             self.val_seed += episodes
         agent.model.train()
 
@@ -434,7 +459,6 @@ class ImitationLearning(object):
                 mean_return = [np.mean(log['return_per_episode']) for log in valid_log]
                 success_rate = [np.mean([1 if r > 0 else 0 for r in log['return_per_episode']]) for log in
                                 valid_log]
-
                 val_log = self.run_epoch_recurrence(self.val_demos)
                 validation_accuracy = np.mean(val_log["accuracy"])
 
@@ -459,23 +483,23 @@ class ImitationLearning(object):
                     # Saving the model
                     logger.info("Saving best model")
 
-                    if torch.cuda.is_available():
+                    if self.args.device >= 0 and torch.cuda.is_available():
                         self.acmodel.cpu()
                     utils.save_model(self.acmodel, self.args.model + "_best")
                     self.obss_preprocessor.vocab.save(utils.get_vocab_path(self.args.model + "_best"))
-                    if torch.cuda.is_available():
-                        self.acmodel.cuda()
+                    if self.args.device >= 0 and torch.cuda.is_available():
+                        self.acmodel.cuda(self.args.device)
                 else:
                     status['patience'] += 1
                     logger.info(
                         "Losing patience, new value={}, limit={}".format(status['patience'], self.args.patience))
 
-                if torch.cuda.is_available():
+                if self.args.device >= 0 and torch.cuda.is_available():
                     self.acmodel.cpu()
                 utils.save_model(self.acmodel, self.args.model)
                 self.obss_preprocessor.vocab.save()
-                if torch.cuda.is_available():
-                    self.acmodel.cuda()
+                if self.args.device >= 0 and torch.cuda.is_available():
+                    self.acmodel.cuda(self.args.device)
                 with open(status_path, 'w') as dst:
                     json.dump(status, dst)
 

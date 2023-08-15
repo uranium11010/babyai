@@ -1,6 +1,7 @@
 import numpy as np
 import gym
 from gym_minigrid.wrappers import RGBImgPartialObsWrapper
+from babyai.levels import create_abs_env
 
 
 # Returns the performance of the agent on the environment for a particular number of episodes.
@@ -30,7 +31,9 @@ def evaluate(agent, env, episodes, model_agent=True, offsets=None):
         while not done:
             action = agent.act(obs)['action']
             obss.append(obs)
-            obs, reward, done, _ = env.step(action)
+            new_obs, reward, done, _ = env.step(action)
+            if new_obs is not None:
+                obs = new_obs
             agent.analyze_feedback(reward, done)
             num_frames += 1
             returnn += reward
@@ -82,7 +85,7 @@ class ManyEnvs(gym.Env):
 
 
 # Returns the performance of the agent on the environment for a particular number of episodes.
-def batch_evaluate(agent, env_name, seed, episodes, return_obss_actions=False, pixel=False):
+def batch_evaluate(agent, env_name, seed, episodes, return_obss_actions=False, pixel=False, rules=None):
     num_envs = min(256, episodes)
 
     envs = []
@@ -90,6 +93,8 @@ def batch_evaluate(agent, env_name, seed, episodes, return_obss_actions=False, p
         env = gym.make(env_name)
         if pixel:
             env = RGBImgPartialObsWrapper(env)
+        if rules is not None:
+            env = create_abs_env(env, rules)
         envs.append(env)
     env = ManyEnvs(envs)
 
@@ -121,7 +126,9 @@ def batch_evaluate(agent, env_name, seed, episodes, return_obss_actions=False, p
                     if not already_done[i]:
                         obss[i].append(many_obs[i])
                         actions[i].append(action[i].item())
-            many_obs, reward, done, _ = env.step(action)
+            new_many_obs, reward, done, _ = env.step(action)
+            many_obs = [new_obs if new_obs is not None else obs for new_obs, obs in zip(new_many_obs, many_obs)]
+            # done = tuple(d or ad for d, ad in zip(done, already_done))
             agent.analyze_feedback(reward, done)
             done = np.array(done)
             just_done = done & (~already_done)

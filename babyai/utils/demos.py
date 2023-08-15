@@ -1,8 +1,15 @@
 import os
 import pickle
+import numpy as np
 
 from .. import utils
 import blosc
+
+from enum import IntEnum
+
+from abstractions.steps import AxStep, Solution
+from abstractions.abstractions import Axiom, ABS_TYPES
+from abstractions.compress import IAPLogN
 
 
 def get_demos_path(demos=None, env=None, origin=None, valid=False):
@@ -62,3 +69,95 @@ def transform_demos(demos):
             new_demo.append((obs, action, done))
         new_demos.append(new_demo)
     return new_demos
+
+
+def abstract_demos(demos, args, rules=None):
+    solutions = []
+    for demo in demos:
+        all_images = blosc.unpack_array(demo[1])
+        directions = demo[2]
+        actions = demo[3]
+        n_observations = all_images.shape[0]
+        assert len(directions) == len(actions) == n_observations, "error transforming demos"
+        states = list(zip(all_images, directions))
+        states.append(None)
+        actions = [AxStep(action._value_, args.abs_type) for action in actions]
+        solutions.append(Solution(states, actions))
+
+    axioms = [Axiom(i, args.abs_type) for i in range(7)]
+    if rules is None:
+        compressor = IAPLogN(solutions, axioms, args.__dict__)
+        _, new_sols = compressor.abstract()
+        rules = compressor.new_axioms
+    else:
+        new_sols = ABS_TYPES[args.abs_type].get_abstracted_sols(solutions, rules[len(axioms):])
+
+    # AbsActions = IntEnum('AbsActions', ['left', 'right', 'forward', 'pickup', 'drop', 'toggle', 'done'] +
+    #         [f'abs_{i}' for i in range(len(rules)-len(axioms))] + ['break_loop', 'do_nothing'], start=0)
+    # import pickle as pkl
+    # pkl.dump(AbsActions, open('test.pkl', 'wb'))
+
+    new_demos = []
+    for demo, sol in zip(demos, new_sols):
+        # assume no nested loops
+        new_demos.append(sol_to_demo(sol, demo[0], rules))
+    return new_demos, rules
+
+
+def sol_to_demo(sol, mission, new_axioms):
+    # assume no nested loops
+    rule2idx = {rule: i for i, rule in enumerate(new_axioms)}
+    def rule_to_actions(rule):
+        if rule.is_axiom:
+            yield 0
+        else:
+            for sub_rule, num_reps in zip(rule.rules, rule.ex_num_reps):
+                if isinstance(sub_rule, tuple):
+                    for i in range(num_reps):
+                        for sub_sub_rule in sub_rule:
+                            yield len(new_axioms) + 1  # continue
+                    yield len(new_axioms)
+                else:
+                    yield len(new_axioms) + 1
+    actions = [rule2idx[step.rule] if i == 0 else action
+                for step in sol.actions for i, action in enumerate(rule_to_actions(step.rule))]
+    # actions = [abs_actions(action) for action in actions]
+    all_images = []
+    directions = []
+    just_broke_loop = False
+    for k, step in enumerate(sol.actions):
+        if step.rule.is_axiom:
+            image, direction = sol.states[k]
+            all_images.append(image)
+            directions.append(direction)
+            if just_broke_loop:
+                all_images.append(image)
+                directions.append(direction)
+                just_broke_loop = False
+        else:
+            j = 0
+            for sub_rule, num_reps in zip(step.rule.rules, step.rule.ex_num_reps):
+                if isinstance(sub_rule, tuple):
+                    for i in range(num_reps):
+                        for sub_sub_rule in sub_rule:
+                            image, direction = step.ex_states[j]
+                            all_images.append(image)
+                            directions.append(direction)
+                            j += 1
+                            if just_broke_loop:
+                                all_images.append(image)
+                                directions.append(direction)
+                                just_broke_loop = False
+                    just_broke_loop = True
+                else:
+                    image, direction = step.ex_states[j]
+                    all_images.append(image)
+                    directions.append(direction)
+                    j += 1
+                    if just_broke_loop:
+                        all_images.append(image)
+                        directions.append(direction)
+                        just_broke_loop = False
+    if just_broke_loop:
+        actions.pop()
+    return mission, blosc.pack_array(np.array(all_images)), directions, actions

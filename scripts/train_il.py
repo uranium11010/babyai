@@ -78,7 +78,10 @@ def main(args):
 
     # Log command, availability of CUDA, and model
     logger.info(args)
-    logger.info("CUDA available: {}".format(torch.cuda.is_available()))
+    logger.info("Trying to use CUDA? {}".format(args.device >= 0))
+    if args.device >= 0:
+        logger.info("CUDA available: {}".format(torch.cuda.is_available()))
+    print('bye')
     logger.info(il_learn.acmodel)
 
     il_learn.train(il_learn.train_demos, writer, csv_writer, status_path, header)

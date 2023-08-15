@@ -24,6 +24,8 @@ from babyai.evaluate import batch_evaluate
 from babyai.utils.agent import ModelAgent
 from gym_minigrid.wrappers import RGBImgPartialObsWrapper
 
+from babyai.levels import create_abs_env
+
 
 # Parse arguments
 parser = ArgumentParser()
@@ -45,19 +47,16 @@ parser.add_argument("--ppo-epochs", type=int, default=4,
                     help="number of epochs for PPO (default: 4)")
 parser.add_argument("--save-interval", type=int, default=50,
                     help="number of updates between two saves (default: 50, 0 means no saving)")
+parser.add_argument("--demos",
+                    help="dataset from which to learn abstractions")
+parser.add_argument("--demos-origin", required=False,
+                    help="origin of the demonstrations: human | agent (REQUIRED or demos or multi-demos required)")
+parser.add_argument("--episodes", type=int, default=0,
+                    help="number of episodes of demonstrations to use"
+                         "(default: 0, meaning all demos)")
 args = parser.parse_args()
 
 utils.seed(args.seed)
-
-# Generate environments
-envs = []
-use_pixel = 'pixel' in args.arch
-for i in range(args.procs):
-    env = gym.make(args.env)
-    if use_pixel:
-        env = RGBImgPartialObsWrapper(env)
-    env.seed(100 * args.seed + i)
-    envs.append(env)
 
 # Define model name
 suffix = datetime.datetime.now().strftime("%y-%m-%d-%H-%M-%S")
@@ -69,17 +68,53 @@ model_name_parts = {
     'arch': args.arch,
     'instr': instr,
     'mem': mem,
+    'abs_type': '' if args.abs_type is None else f'_{args.abs_type}',
     'seed': args.seed,
     'info': '',
     'coef': '',
     'suffix': suffix}
-default_model_name = "{env}_{algo}_{arch}_{instr}_{mem}_seed{seed}{info}{coef}_{suffix}".format(**model_name_parts)
+default_model_name = "{env}_{algo}_{arch}_{instr}_{mem}{abs_type}_seed{seed}{info}{coef}_{suffix}".format(**model_name_parts)
 if args.pretrained_model:
     default_model_name = args.pretrained_model + '_pretrained_' + default_model_name
 args.model = args.model.format(**model_name_parts) if args.model else default_model_name
 
 utils.configure_logging(args.model)
 logger = logging.getLogger(__name__)
+
+# Generate environments
+envs = []
+use_pixel = 'pixel' in args.arch
+for i in range(args.procs):
+    env = gym.make(args.env)
+    if use_pixel:
+        env = RGBImgPartialObsWrapper(env)
+    env.seed(100 * args.seed + i)
+    envs.append(env)
+
+if args.abs_type is not None:
+    demos_path = utils.get_demos_path(args.demos, args.env, args.demos_origin, valid=False)
+    demos_path_valid = utils.get_demos_path(args.demos, args.env, args.demos_origin, valid=True)
+
+    logger.info('loading demos')
+    demos = utils.load_demos(demos_path)
+    logger.info('loaded demos')
+    if args.episodes:
+        if args.episodes > len(demos):
+            raise ValueError("there are only {} train demos".format(len(self.train_demos)))
+        demos = demos[:args.episodes]
+
+    if os.path.isfile(os.path.join(utils.get_model_dir(args.model), "demos.pkl")):
+        logger.info('pre-abstracted demos and env found. loading...')
+        utils.load_demos(os.path.join(utils.get_model_dir(args.model), "demos.pkl"))
+        utils.load_demos(os.path.join(utils.get_model_dir(args.model), "rules.pkl"))
+        logger.info('pre-abstracted demos and env loaded')
+    else:
+        logger.info('abstracting demos and env')
+        demos, rules = utils.abstract_demos(demos, args)
+        utils.save_demos(demos, os.path.join(utils.get_model_dir(args.model), "demos.pkl"))
+        utils.save_demos(rules, os.path.join(utils.get_model_dir(args.model), "rules.pkl"))
+        envs = [create_abs_env(env, rules) for env in envs]
+        logger.info('abstracted demos and env')
 
 # Define obss preprocessor
 if 'emb' in args.arch:
@@ -100,8 +135,8 @@ if acmodel is None:
 obss_preprocessor.vocab.save()
 utils.save_model(acmodel, args.model)
 
-if torch.cuda.is_available():
-    acmodel.cuda()
+if args.device >= 0 and torch.cuda.is_available():
+    acmodel.cuda(args.device)
 
 # Define actor-critic algo
 
@@ -111,7 +146,7 @@ if args.algo == "ppo":
                              args.gae_lambda,
                              args.entropy_coef, args.value_loss_coef, args.max_grad_norm, args.recurrence,
                              args.optim_eps, args.clip_eps, args.ppo_epochs, args.batch_size, obss_preprocessor,
-                             reshape_reward)
+                             reshape_reward, device=args.device)
 else:
     raise ValueError("Incorrect algorithm name: {}".format(args.algo))
 
@@ -143,6 +178,13 @@ if args.tb:
     from tensorboardX import SummaryWriter
 
     writer = SummaryWriter(utils.get_log_dir(args.model))
+if args.wandb:
+    import wandb
+    wandb.init(id=args.model,
+               name=args.model,
+               entity="conpole2",
+               project=args.expt_id)
+
 csv_path = os.path.join(utils.get_log_dir(args.model), 'log.csv')
 first_created = not os.path.exists(csv_path)
 # we don't buffer data going in the csv log, cause we assume
@@ -219,6 +261,8 @@ while status['num_frames'] < args.frames:
             assert len(header) == len(data)
             for key, value in zip(header, data):
                 writer.add_scalar(key, float(value), status['num_frames'])
+        if args.wandb:
+            wandb.log(dict(zip(header, data)))
 
         csv_writer.writerow(data)
 
@@ -231,10 +275,10 @@ while status['num_frames'] < args.frames:
             utils.save_model(acmodel, args.model)
 
         # Testing the model before saving
-        agent = ModelAgent(args.model, obss_preprocessor, argmax=True)
+        agent = ModelAgent(args.model, obss_preprocessor, argmax=True, device=args.device)
         agent.model = acmodel
         agent.model.eval()
-        logs = batch_evaluate(agent, test_env_name, args.val_seed, args.val_episodes, pixel=use_pixel)
+        logs = batch_evaluate(agent, test_env_name, args.val_seed, args.val_episodes, pixel=use_pixel, rules=None if args.abs_type is None else rules)
         agent.model.train()
         mean_return = np.mean(logs["return_per_episode"])
         success_rate = np.mean([1 if r > 0 else 0 for r in logs['return_per_episode']])

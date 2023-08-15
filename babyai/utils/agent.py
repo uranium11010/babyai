@@ -33,15 +33,15 @@ class Agent(ABC):
 class ModelAgent(Agent):
     """A model-based agent. This agent behaves using a model."""
 
-    def __init__(self, model_or_name, obss_preprocessor, argmax):
+    def __init__(self, model_or_name, obss_preprocessor, argmax, device=0):
         if obss_preprocessor is None:
             assert isinstance(model_or_name, str)
             obss_preprocessor = utils.ObssPreprocessor(model_or_name)
         self.obss_preprocessor = obss_preprocessor
         if isinstance(model_or_name, str):
             self.model = utils.load_model(model_or_name)
-            if torch.cuda.is_available():
-                self.model.cuda()
+            if device >= 0 and torch.cuda.is_available():
+                self.model.cuda(device)
         else:
             self.model = model_or_name
         self.device = next(self.model.parameters()).device
@@ -154,12 +154,12 @@ class BotAgent:
         pass
 
 
-def load_agent(env, model_name, demos_name=None, demos_origin=None, argmax=True, env_name=None):
+def load_agent(env, model_name, demos_name=None, demos_origin=None, argmax=True, env_name=None, device=0):
     # env_name needs to be specified for demo agents
     if model_name == 'BOT':
         return BotAgent(env)
     elif model_name is not None:
         obss_preprocessor = utils.ObssPreprocessor(model_name, env.observation_space)
-        return ModelAgent(model_name, obss_preprocessor, argmax)
+        return ModelAgent(model_name, obss_preprocessor, argmax, device)
     elif demos_origin is not None or demos_name is not None:
         return DemoAgent(demos_name=demos_name, env_name=env_name, origin=demos_origin)

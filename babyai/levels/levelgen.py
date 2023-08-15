@@ -4,6 +4,8 @@ from copy import deepcopy
 import gym
 from gym_minigrid.roomgrid import RoomGrid
 from .verifier import *
+# from verifier import *
+from abstractions.abs_util import make_rule_trie
 
 
 class RejectSampling(Exception):
@@ -491,6 +493,85 @@ def register_levels(module_name, globals):
         # Store the name and gym id on the level class
         level_class.level_name = level_name
         level_class.gym_id = gym_id
+
+
+def create_abs_env(env, rules):  # `env` and `rules` must not be mutated
+    """
+    Creates and registers environment with abstractions from `env` (subclass of `RoomGridLevel`)
+    Returns subclass of `RoomGridLevel` with the `step` method redefined
+
+    Atomic actions: 0..6
+    Abstractions: 7+
+    Break loop: number of rules
+    Continue loop: else
+    When carrying out an abstraction, all actions are ignored; exception:
+    at the end of a loop iteration, 7 breaks loop
+    """
+
+    class AbsLevel(RoomGridLevel):
+        def __init__(self):
+            # self.update_env()
+            self.observation_space = env.observation_space
+            self.action_space = gym.spaces.discrete.Discrete(len(rules) + 2)
+            self.step_count = None
+            self.max_steps = env.max_steps
+            self.cur_rule = None
+            self.cur_node = None
+            self.rules = rules
+            self.AbsType = rules[0].AbsType
+            self.abs_type = self.AbsType.abs_type
+            for i, rule in enumerate(self.rules):
+                if rule.is_abs:
+                    self.num_ax = i
+                    break
+            self.num_rules = len(self.rules)
+            self.rule2idx = {rule: i for i, rule in enumerate(rules)}
+
+        # def update_env(self):
+        #     self.__dict__.update(env.__dict__)
+
+        # def room_from_pos(self, *args, **kwargs):
+        #     return env.room_from_pos(*args, **kwargs)
+
+        def reset(self):
+            res = env.reset()
+            self.step_count = 0
+            # self.update_env()
+            return res
+
+        def step(self, action):
+            self.step_count += 1
+            if self.cur_rule is None or not self.cur_node.has_children():
+                if action < self.num_ax:
+                    self.cur_rule = None
+                    self.cur_node = None
+                    res = env.step(action)
+                    # self.update_env()
+                    return res
+                if action < self.num_rules:
+                    self.cur_rule = self.rules[action]
+                    start_node = make_rule_trie([self.cur_rule], self.rule2idx)
+                    self.cur_node = next(start_node.get_children())
+                    res = env.step(self.cur_node.key)
+                    # self.update_env()
+                    return res
+                return env.gen_obs(), 0., self.step_count >= self.max_steps, {}
+
+            if self.cur_node._exit_loop is not None:
+                if action == self.num_rules:
+                    self.cur_node = self.cur_node._exit_loop
+                    return env.gen_obs(), 0., self.step_count >= self.max_steps, {}
+                self.cur_node = next(self.cur_node._continue_loop.get_children())
+                res = env.step(self.cur_node.key)
+                # self.update_env()
+                return res
+
+            self.cur_node = next(self.cur_node.get_children())
+            res = env.step(self.cur_node.key)
+            # self.update_env()
+            return res
+
+    return AbsLevel()
 
 
 def test():

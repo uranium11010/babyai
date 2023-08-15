@@ -27,6 +27,14 @@ class ArgumentParser(argparse.ArgumentParser):
                             help="number of processes (default: 64)")
         self.add_argument("--tb", action="store_true", default=False,
                             help="log into Tensorboard")
+        self.add_argument("--wandb", action="store_true", default=False,
+                            help="log into WandB")
+        self.add_argument("--expt-id",
+                            help="ID of experiment")
+        self.add_argument("--abs-type",
+                            help="Type of abstraction")
+        self.add_argument("--device", type=int, default=0,
+                            help="cuda device")
 
         # Training arguments
         self.add_argument("--log-interval", type=int, default=10,
